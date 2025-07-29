@@ -1,8 +1,8 @@
 streamlit
-pymupdf
+PyMuPDF
 python-docx
-nltk
-spacy
 pandas
+nltk
 scikit-learn
 unidecode
+spacy
