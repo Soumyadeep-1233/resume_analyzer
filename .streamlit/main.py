@@ -5,7 +5,6 @@ import pandas as pd
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-import spacy
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
@@ -21,13 +20,14 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Download spaCy model if not already installed
+# Initialize spaCy with fallback
+nlp = None
 try:
+    import spacy
     nlp = spacy.load('en_core_web_sm')
-except OSError:
-    import subprocess
-    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
-    nlp = spacy.load('en_core_web_sm')
+except (OSError, ImportError):
+    st.warning("⚠️ Advanced NLP features unavailable. Using basic text processing.")
+    nlp = None
 
 # Sample job descriptions (replace with your actual data)
 JOB_DESCRIPTIONS = {
@@ -74,23 +74,65 @@ def clean_text(text):
     return text.lower()
 
 def extract_skills(text):
-    """Extract technical skills using spaCy"""
-    doc = nlp(text)
+    """Extract technical skills using spaCy or fallback method"""
     skills = set()
     
-    for ent in doc.ents:
-        if ent.label_ == "SKILL":
-            skills.add(ent.text.lower())
+    # Try spaCy first if available
+    if nlp is not None:
+        try:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ in ["SKILL", "ORG", "PRODUCT"]:  # Broader entity types
+                    skills.add(ent.text.lower())
+        except Exception:
+            pass  # Fall back to manual extraction
     
-    # Manual skill extraction as fallback
+    # Enhanced manual skill extraction
     skill_keywords = [
-        "python", "java", "sql", "machine learning", "aws",
-        "docker", "kubernetes", "agile", "scrum", "javascript",
-        "react", "tensorflow", "pytorch", "tableau", "excel"
+        # Programming Languages
+        "python", "java", "javascript", "c++", "c#", "r", "php", "swift", "kotlin",
+        "typescript", "go", "rust", "scala", "ruby", "perl",
+        
+        # Databases
+        "sql", "mysql", "postgresql", "mongodb", "redis", "elasticsearch", "oracle",
+        "sqlite", "cassandra", "dynamodb",
+        
+        # Machine Learning & AI
+        "machine learning", "deep learning", "tensorflow", "pytorch", "scikit-learn",
+        "keras", "opencv", "nlp", "computer vision", "neural networks", "ai",
+        
+        # Cloud & DevOps
+        "aws", "azure", "gcp", "docker", "kubernetes", "jenkins", "terraform",
+        "ansible", "chef", "puppet", "ci/cd", "devops",
+        
+        # Web Technologies
+        "react", "angular", "vue", "node.js", "express", "django", "flask",
+        "spring", "html", "css", "bootstrap", "jquery",
+        
+        # Data & Analytics
+        "tableau", "power bi", "excel", "pandas", "numpy", "matplotlib", "seaborn",
+        "spark", "hadoop", "etl", "data analysis", "statistics",
+        
+        # Project Management
+        "agile", "scrum", "kanban", "jira", "confluence", "project management",
+        "waterfall", "lean", "six sigma",
+        
+        # Other Technologies
+        "git", "github", "gitlab", "linux", "windows", "macos", "api", "rest",
+        "graphql", "microservices", "blockchain", "iot"
     ]
     
+    text_lower = text.lower()
     for skill in skill_keywords:
-        if skill in text.lower():
+        if skill in text_lower:
+            skills.add(skill)
+    
+    # Also look for patterns like "X years of experience in Y"
+    experience_pattern = r'(\d+)\s+years?\s+(?:of\s+)?(?:experience\s+)?(?:in\s+|with\s+)?([a-zA-Z0-9\s\-\+#\.]+)'
+    matches = re.findall(experience_pattern, text_lower)
+    for years, skill in matches:
+        skill = skill.strip()
+        if len(skill) > 2 and len(skill) < 30:  # Reasonable skill name length
             skills.add(skill)
     
     return list(skills)
@@ -100,23 +142,56 @@ def extract_text_from_file(uploaded_file):
     text = ""
     file_type = uploaded_file.name.split('.')[-1].lower()
     
-    if file_type == "pdf":
-        with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
-            text = " ".join([page.get_text() for page in doc])
-    elif file_type == "docx":
-        doc = Document(BytesIO(uploaded_file.read()))
-        text = " ".join([para.text for para in doc.paragraphs])
+    try:
+        if file_type == "pdf":
+            # Reset file pointer
+            uploaded_file.seek(0)
+            with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+                text = " ".join([page.get_text() for page in doc])
+        elif file_type == "docx":
+            # Reset file pointer
+            uploaded_file.seek(0)
+            doc = Document(BytesIO(uploaded_file.read()))
+            text = " ".join([para.text for para in doc.paragraphs])
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+            
+        if not text.strip():
+            raise ValueError("No text could be extracted from the file")
+            
+    except Exception as e:
+        st.error(f"Error extracting text from file: {str(e)}")
+        return ""
     
     return clean_text(text)
 
 def calculate_match(resume_text, job_description):
     """Calculate cosine similarity between resume and JD"""
-    vectorizer = CountVectorizer().fit_transform([resume_text, job_description])
-    vectors = vectorizer.toarray()
-    return cosine_similarity([vectors[0]], [vectors[1]])[0][0] * 100
+    try:
+        # Use TF-IDF instead of simple count for better results
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
+        vectors = vectorizer.fit_transform([resume_text, job_description])
+        similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
+        return similarity * 100
+    except Exception:
+        # Fallback to basic method
+        vectorizer = CountVectorizer()
+        vectors = vectorizer.fit_transform([resume_text, job_description])
+        similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
+        return similarity * 100
 
 def analyze_resume(resume_text, selected_job):
     """Core analysis function"""
+    if not resume_text.strip():
+        return {
+            "match_score": 0,
+            "skills": [],
+            "missing_skills": [],
+            "job_description": JOB_DESCRIPTIONS[selected_job],
+            "error": "No text found in resume"
+        }
+    
     # Extract and process
     skills = extract_skills(resume_text)
     jd_text = clean_text(JOB_DESCRIPTIONS[selected_job])
@@ -138,54 +213,112 @@ def main():
     st.title("📄 Resume Analyzer with Job Match Score")
     st.write("Upload your resume and see how well it matches your target job!")
     
+    # Info about spaCy status
+    if nlp is None:
+        st.info("ℹ️ Running in basic mode. For enhanced NLP features, ensure spaCy and en_core_web_sm are properly installed.")
+    
     with st.sidebar:
         st.header("Settings")
         selected_job = st.selectbox("Select Job Role:", list(JOB_DESCRIPTIONS.keys()))
-        uploaded_file = st.file_uploader("Upload Resume (PDF or DOCX):", type=["pdf", "docx"])
+        uploaded_file = st.file_uploader(
+            "Upload Resume (PDF or DOCX):", 
+            type=["pdf", "docx"],
+            help="Upload your resume in PDF or DOCX format"
+        )
+        
+        if uploaded_file:
+            st.success(f"✅ File uploaded: {uploaded_file.name}")
     
     if uploaded_file and selected_job:
-        try:
-            # Process resume
-            resume_text = extract_text_from_file(uploaded_file)
-            analysis_results = analyze_resume(resume_text, selected_job)
-            
-            # Display results
-            st.success("Analysis Complete!")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Match Score", f"{analysis_results['match_score']}%")
-            
-            with col2:
-                st.metric("Key Skills Found", len(analysis_results['skills']))
-            
-            st.divider()
-            
-            # Skills section
-            st.subheader("🔍 Skill Analysis")
-            st.write("**Your Skills:**")
-            st.write(", ".join(analysis_results['skills']) if analysis_results['skills'] else "No skills detected")
-            
-            if analysis_results['missing_skills']:
-                st.warning(f"**Skills to improve:** {', '.join(analysis_results['missing_skills'])}")
-            
-            st.divider()
-            
-            # Job Description preview
-            with st.expander("📝 View Job Description"):
-                st.write(analysis_results['job_description'])
-            
-            # Feedback
-            st.subheader("💡 Suggestions")
-            if analysis_results['match_score'] > 75:
-                st.success("Strong match! Consider highlighting your most relevant skills in a summary section.")
-            elif analysis_results['match_score'] > 50:
-                st.warning("Moderate match. Try aligning your skills with the job requirements.")
-            else:
-                st.error("Low match. Consider acquiring the missing skills or applying for a different role.")
-            
-        except Exception as e:
-            st.error(f"Error processing file: {str(e)}")
+        with st.spinner("Analyzing your resume..."):
+            try:
+                # Process resume
+                resume_text = extract_text_from_file(uploaded_file)
+                
+                if not resume_text:
+                    st.error("❌ Could not extract text from the uploaded file. Please ensure it's a valid PDF or DOCX file with readable text.")
+                    return
+                
+                analysis_results = analyze_resume(resume_text, selected_job)
+                
+                if "error" in analysis_results:
+                    st.error(f"❌ {analysis_results['error']}")
+                    return
+                
+                # Display results
+                st.success("✅ Analysis Complete!")
+                
+                # Metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Match Score", f"{analysis_results['match_score']}%")
+                
+                with col2:
+                    st.metric("Skills Found", len(analysis_results['skills']))
+                
+                with col3:
+                    st.metric("Missing Skills", len(analysis_results['missing_skills']))
+                
+                st.divider()
+                
+                # Skills section
+                st.subheader("🔍 Skill Analysis")
+                
+                if analysis_results['skills']:
+                    st.write("**✅ Your Skills:**")
+                    # Display skills in a nice format
+                    skills_text = ", ".join(analysis_results['skills'])
+                    st.success(skills_text)
+                else:
+                    st.write("**Your Skills:**")
+                    st.warning("No specific skills detected. Try including more technical keywords in your resume.")
+                
+                if analysis_results['missing_skills']:
+                    st.write("**❌ Skills to Improve:**")
+                    missing_skills_text = ", ".join(analysis_results['missing_skills'])
+                    st.error(missing_skills_text)
+                else:
+                    st.write("**🎉 Great! You have all the key skills mentioned in the job description.**")
+                
+                st.divider()
+                
+                # Job Description preview
+                with st.expander("📝 View Job Description"):
+                    st.write(analysis_results['job_description'])
+                
+                # Feedback
+                st.subheader("💡 Recommendations")
+                score = analysis_results['match_score']
+                
+                if score >= 80:
+                    st.success("🌟 **Excellent Match!** Your resume aligns very well with this role. Consider highlighting your most relevant achievements in a summary section.")
+                elif score >= 60:
+                    st.warning("⚠️ **Good Match** - Consider emphasizing the skills that match the job requirements and adding any missing key skills to improve your chances.")
+                elif score >= 40:
+                    st.warning("📈 **Moderate Match** - Try to better align your resume with the job requirements. Focus on the missing skills and consider gaining experience in those areas.")
+                else:
+                    st.error("❌ **Low Match** - This role might not be the best fit based on your current resume. Consider acquiring the missing skills or applying for roles that better match your background.")
+                
+                # Additional tips
+                with st.expander("📚 Tips to Improve Your Resume"):
+                    st.markdown("""
+                    **General Tips:**
+                    - Use keywords from the job description throughout your resume
+                    - Quantify your achievements with numbers and metrics
+                    - Tailor your resume for each specific job application
+                    - Include a professional summary highlighting your key skills
+                    - List your technical skills in a dedicated section
+                    
+                    **For Better Matching:**
+                    - Mirror the language used in the job posting
+                    - Include relevant certifications and courses
+                    - Highlight projects that demonstrate required skills
+                    - Use action verbs to describe your accomplishments
+                    """)
+                
+            except Exception as e:
+                st.error(f"❌ An error occurred while processing your resume: {str(e)}")
+                st.info("Please try uploading a different file or contact support if the issue persists.")
 
 if __name__ == "__main__":
     main()
